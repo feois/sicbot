@@ -1,24 +1,25 @@
 
-use std::{collections::HashMap, env, sync::{Arc, RwLock}};
+use std::{env, sync::Arc};
 
 use anyhow::{Error, Result};
-use poise::{CreateReply, serenity_prelude::{self as serenity, FutureExt}};
+use docstr::docstr;
+use poise::{serenity_prelude::{self as serenity, FutureExt}};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, stdin, stdout};
 
-type Context<'a> = poise::Context<'a, Arc<RwLock<data::Data>>, Error>;
+use crate::{data::Data, utils::ContextUtils};
+
+type Context<'a> = poise::Context<'a, Arc<Data>, Error>;
 
 mod data;
 mod user;
 mod bet;
+mod room;
+mod utils;
 
 const DATA_PATH: &'static str = "data.json";
 
-async fn private_reply(context: Context<'_>, s: impl Into<String>) -> Result<()> {
-    context.send(CreateReply::new().content(s).ephemeral(true)).await?;
-    Ok(())
-}
-
 #[poise::command(slash_command, prefix_command, subcommands(
+    "help",
     "bet::small",
     "bet::big",
     "bet::odd",
@@ -33,8 +34,20 @@ async fn private_reply(context: Context<'_>, s: impl Into<String>) -> Result<()>
     "bet::total",
     "bet::four",
     "bet::rules",
+    "user::create",
+    "user::remove",
+    "user::switch",
+    "user::list",
+    "user::view",
 ))]
 async fn sicbo(_: Context<'_>) -> Result<()> { Ok(()) }
+
+#[poise::command(prefix_command, slash_command)]
+async fn help(context: Context<'_>) -> Result<()> {
+    context.private_reply(docstr!(
+        /// 
+    )).await
+}
 
 async fn console() -> Result<()> {
     let mut reader = BufReader::new(stdin());
@@ -62,11 +75,9 @@ async fn console() -> Result<()> {
 async fn main() {
     dotenvy::dotenv().expect(".env not found");
     
-    let data = Arc::new(RwLock::new(std::fs::read_to_string(DATA_PATH).ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| data::Data {
-            users: HashMap::new(),
-        })));
+    let data = Arc::new(std::fs::read_to_string(DATA_PATH).ok()
+        .and_then(|s| serde_json::from_str::<Data>(&s).ok())
+        .unwrap_or_default());
     let data_clone = data.clone();
     let token = env::var("DISCORD_TOKEN").expect("envvar DISCORD_TOKEN not found");
     let intents = serenity::GatewayIntents::non_privileged();
@@ -92,9 +103,7 @@ async fn main() {
         
         shard_manager.shutdown_all().await;
         
-        if let Ok(data) = data.read().inspect_err(|_| eprintln!("Lock poisoned")) {
-            std::fs::write(DATA_PATH, serde_json::to_string_pretty(&*data).unwrap()).unwrap();
-        }
+        std::fs::write(DATA_PATH, serde_json::to_string_pretty(&data).unwrap()).unwrap();
     });
     
     client.start().await.unwrap();

@@ -1,11 +1,14 @@
 
 use std::fmt::Debug;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+use docstr::docstr;
+use poise::serenity_prelude::Mentionable;
+use serde::{Deserialize, Serialize};
 
-use crate::{Context, private_reply};
+use crate::{Context, utils::*};
 
-#[derive(poise::ChoiceParameter, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[derive(poise::ChoiceParameter, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Dice {
     #[name = "1"] _1,
     #[name = "2"] _2,
@@ -15,7 +18,7 @@ pub enum Dice {
     #[name = "6"] _6,
 }
 
-#[derive(poise::ChoiceParameter, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[derive(poise::ChoiceParameter, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Total {
     #[name = "4"] _4,
     #[name = "5"] _5,
@@ -33,7 +36,7 @@ pub enum Total {
     #[name = "17"] _17,
 }
 
-#[derive(poise::ChoiceParameter)]
+#[derive(poise::ChoiceParameter, Serialize, Deserialize, Clone, Copy)]
 pub enum Four {
     #[name = "6543"] _6543,
     #[name = "6532"] _6532,
@@ -42,7 +45,7 @@ pub enum Four {
 }
 
 #[allow(non_camel_case_types)]
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum Bets {
     small,
     big,
@@ -59,19 +62,14 @@ pub enum Bets {
     four(Four),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct Dices(Dice, Dice, Dice);
 
 impl Dices {
     pub fn new(d1: Dice, d2: Dice, d3: Dice) -> Self { Self(d1, d2, d3) }
     
-    pub fn sum(self) -> u8 { self.0 as u8 + self.1 as u8 + self.2 as u8 + 3 }
-    
-    pub fn total(self) -> Option<Total> {
-        let i =self.sum();
-        if (4..=17).contains(&i) { Some(unsafe { std::mem::transmute(i - 4) }) }
-        else { None }
-    }
+    pub fn sum(self) -> u8 { self.0.to_int() + self.1.to_int() + self.2.to_int() }
+    pub fn total(self) -> Option<Total> { Total::from_int(self.sum()) }
     
     pub fn odd(self) -> bool { self.sum() % 2 == 1 }
     pub fn even(self) -> bool { !self.odd() }
@@ -87,7 +85,7 @@ impl Dices {
 }
 
 impl Bets {
-    pub fn play(self, d: Dices) -> u64 {
+    pub fn odds(self, d: Dices) -> u64 {
         use Bets::*;
         use Total::*;
         
@@ -132,61 +130,104 @@ impl Bets {
     }
 }
 
-impl Debug for Dice { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", *self as u8 + 1) } }
-impl Debug for Total { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", *self as u8 + 4) } }
+impl Debug for Dice { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.to_int().fmt(f) } }
+impl Debug for Total { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.to_int().fmt(f) } }
 impl Debug for Four {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match *self {
+        match self {
             Four::_6543 => "6543",
             Four::_6532 => "6532",
             Four::_5432 => "5432",
             Four::_4321 => "4321",
-        })
+        }.fmt(f)
+    }
+}
+
+impl Dice {
+    fn to_int(self) -> u8 { self as u8 + 1 }
+    fn from_int(i: u8) -> Option<Self> { (1..=6).contains(&i).then(|| unsafe { std::mem::transmute(i - 1) }) }
+}
+impl Total {
+    fn to_int(self) -> u8 { self as u8 + 4 }
+    fn from_int(i: u8) -> Option<Self> { (4..=17).contains(&i).then(|| unsafe { std::mem::transmute(i - 4) }) }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct Play {
+    pub bet: Bets,
+    pub dices: Dices,
+    pub amount: u64,
+}
+
+pub enum PlayResult {
+    Gain(u64),
+    Loss(u64),
+}
+
+impl Play {
+    pub fn result(&self) -> PlayResult {
+        match self.bet.odds(self.dices) {
+            0 => PlayResult::Loss(self.amount),
+            odds => PlayResult::Gain(self.amount * odds),
+        }
     }
 }
 
 async fn user_bet(context: Context<'_>, amount: u64, bet: Option<Bets>) -> Result<()> {
     if let Some(bet) = bet {
-        let f = || unsafe { std::mem::transmute(rand::random_range(1..=6) as u8 - 1) };
+        let user = context.data().user(context.author().id)?;
+        
+        if user.lock_ref(|user| user.money < amount)? { return context.private_reply("Not enough money!").await }
+        
+        let f = || Dice::from_int(rand::random_range(1..=6)).unwrap();
         let [d1, d2, d3] = [f(), f(), f()];
         let d = Dices::new(d1, d2, d3);
-        
-        let mut s = String::new();
-        let mut valid = true;
-        
-        {
-            let Ok(mut data) = context.data().write() else { bail!("Lock poisoned") };
-            let user = data.get_mut(context.author().id);
+        let s = user.lock_mut(|user| {
+            let play = Play { bet, dices: d, amount };
             
-            if user.money < amount {
-                valid = false
-            }
-            else {
-                s = format!("Dice: {:?} + {:?} + {:?} = {}\nBet: {:?}\n", d1, d2, d3, d.sum(), bet);
-                
-                match bet.play(d) {
-                    0 => {
-                        s += &format!("You lost :(\nLoss: -{}\n", amount);
-                        user.money -= amount;
-                    }
-                    odds => {
-                        let gain = amount * odds;
-                        s += &format!("You won!\nGain: +{}\n", gain);
-                        user.money += gain;
+            user.active_mut().play(play);
+            
+            struct FormatResult(PlayResult);
+            
+            impl Debug for FormatResult {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    match self {
+                        FormatResult(PlayResult::Gain(n)) => docstr!(write! f
+                            /// You won!
+                            /// Gain: +{}
+                            n
+                        ),
+                        FormatResult(PlayResult::Loss(n)) => docstr!(write! f
+                            /// You lost :(
+                            /// Loss: -{}
+                            n
+                        ),
                     }
                 }
-                
-                s += &format!("Money: {}", user.money);
             }
-        }
-        
-        if !valid { return private_reply(context, "Not enough money!").await }
+            
+            docstr!(format!
+                /// User: {user} (Profile: {profile})
+                /// Bet: {bet:?}
+                /// Dice: {d1:?} {d2:?} {d3:?} {d}
+                /// 
+                /// {result:?}
+                /// 
+                /// Money: {money}
+                bet = bet,
+                d1 = d1, d2 = d2, d3 = d3, d = d.sum(),
+                user = user.id().mention(),
+                profile = user.active_profile(),
+                money = user.active_ref().money(),
+                result = FormatResult(play.result()),
+            )
+        })?;
         
         context.say(s).await?;
         
         Ok(())
     }
-    else { private_reply(context, "Must be different number!").await }
+    else { context.private_reply("Must be different number!").await }
 }
 
 macro_rules! bet {
@@ -220,24 +261,22 @@ bet!(doc="win if triple (odds: 33)" all() { Bets::all });
 bet!(doc="choose 4-17, win if total is the same (odds: 6~65)" total(t: Total) { Bets::total(t) });
 bet!(doc="choose 6543/6532/5432/4321, win if all thrown are different and in selected (odds: 60)" four(f: Four) { Bets::four(f) });
 
-const RULES: &'static str = "
-small: win if 4 ≤ total ≤ 10 and not triple (odds: 1)
-big: win if 11 ≤ total ≤ 17 and not triple (odds: 1)
-odd: win if total is odd and not triple (odds: 1)
-even: win if total is even and not triple (odds: 1)
-any: choose 1~6, win if it is thrown (odds: 1, 2 if double, 12 if triple)
-any2: choose 2 different 1~6, win if both are thrown (odds: 6)
-any3: choose 3 different 1~6, win if all are thrown (odds: 33)
-any21: choose 2 different 1~6, win if first is thrown double and second is thrown (odds: 60)
-double: choose 1~6, win if it is double thrown (odds: 11)
-triple: choose 1~6, win if it is triple thrown (odds: 190)
-all: win if triple (odds: 33)
-total: choose 4~17, win if total is the same (odds: 4/17=65, 5/16=33, 6/15=19, 7/14=12, 8/13=8, 9/12=7, 10/11=6)
-four: choose 6543/6532/5432/4321, win if all thrown are different and in selected (odds: 60)
-";
-
 #[poise::command(slash_command, prefix_command)]
 pub async fn rules(context: Context<'_>) -> Result<()> {
-    context.say(RULES).await?;
+    context.say(docstr!(
+        /// small: win if 4 ≤ total ≤ 10 and not triple (odds: 1)
+        /// big: win if 11 ≤ total ≤ 17 and not triple (odds: 1)
+        /// odd: win if total is odd and not triple (odds: 1)
+        /// even: win if total is even and not triple (odds: 1)
+        /// any: choose 1~6, win if it is thrown (odds: 1, 2 if double, 12 if triple)
+        /// any2: choose 2 different 1~6, win if both are thrown (odds: 6)
+        /// any3: choose 3 different 1~6, win if all are thrown (odds: 33)
+        /// any21: choose 2 different 1~6, win if first is thrown double and second is thrown (odds: 60)
+        /// double: choose 1~6, win if it is double thrown (odds: 11)
+        /// triple: choose 1~6, win if it is triple thrown (odds: 190)
+        /// all: win if triple (odds: 33)
+        /// total: choose 4~17, win if total is the same (odds: 4/17=65, 5/16=33, 6/15=19, 7/14=12, 8/13=8, 9/12=7, 10/11=6)
+        /// four: choose 6543/6532/5432/4321, win if all thrown are different and in selected (odds: 60)
+    )).await?;
     Ok(())
 }
