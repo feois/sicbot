@@ -6,7 +6,7 @@ use docstr::docstr;
 use poise::{serenity_prelude::{self as serenity, FutureExt}};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, stdin, stdout};
 
-use crate::{data::Data, utils::ContextUtils};
+use crate::{data::Data, utils::*};
 
 type Context<'a> = poise::Context<'a, Arc<Data>, Error>;
 
@@ -44,7 +44,7 @@ async fn sicbo(_: Context<'_>) -> Result<()> { Ok(()) }
 
 #[poise::command(prefix_command, slash_command)]
 async fn help(context: Context<'_>) -> Result<()> {
-    context.private_reply(docstr!(
+    context.message().private().send(docstr!(
         /// 
     )).await
 }

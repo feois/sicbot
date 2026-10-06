@@ -174,60 +174,56 @@ impl Play {
 }
 
 async fn user_bet(context: Context<'_>, amount: u64, bet: Option<Bets>) -> Result<()> {
-    if let Some(bet) = bet {
-        let user = context.data().user(context.author().id)?;
+    let Some(bet) = bet else { return context.message().private().send("Must be different number!").await };
+    let user = context.data().user(context.author().id)?;
+    
+    if user.lock_ref(|user| user.money < amount)? { return context.message().private().send("Not enough money!").await }
+    
+    let f = || Dice::from_int(rand::random_range(1..=6)).unwrap();
+    let [d1, d2, d3] = [f(), f(), f()];
+    let d = Dices::new(d1, d2, d3);
+    let s = user.lock_mut(|user| {
+        let play = Play { bet, dices: d, amount };
         
-        if user.lock_ref(|user| user.money < amount)? { return context.private_reply("Not enough money!").await }
+        user.active_mut().play(play);
         
-        let f = || Dice::from_int(rand::random_range(1..=6)).unwrap();
-        let [d1, d2, d3] = [f(), f(), f()];
-        let d = Dices::new(d1, d2, d3);
-        let s = user.lock_mut(|user| {
-            let play = Play { bet, dices: d, amount };
-            
-            user.active_mut().play(play);
-            
-            struct FormatResult(PlayResult);
-            
-            impl Debug for FormatResult {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    match self {
-                        FormatResult(PlayResult::Gain(n)) => docstr!(write! f
-                            /// You won!
-                            /// Gain: +{}
-                            n
-                        ),
-                        FormatResult(PlayResult::Loss(n)) => docstr!(write! f
-                            /// You lost :(
-                            /// Loss: -{}
-                            n
-                        ),
-                    }
+        struct FormatResult(PlayResult);
+        
+        impl Debug for FormatResult {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    FormatResult(PlayResult::Gain(n)) => docstr!(write! f
+                        /// You won!
+                        /// Gain: +{}
+                        n
+                    ),
+                    FormatResult(PlayResult::Loss(n)) => docstr!(write! f
+                        /// You lost :(
+                        /// Loss: -{}
+                        n
+                    ),
                 }
             }
-            
-            docstr!(format!
-                /// User: {user} (Profile: {profile})
-                /// Bet: {bet:?}
-                /// Dice: {d1:?} {d2:?} {d3:?} {d}
-                /// 
-                /// {result:?}
-                /// 
-                /// Money: {money}
-                bet = bet,
-                d1 = d1, d2 = d2, d3 = d3, d = d.sum(),
-                user = user.id().mention(),
-                profile = user.active_profile(),
-                money = user.active_ref().money(),
-                result = FormatResult(play.result()),
-            )
-        })?;
+        }
         
-        context.say(s).await?;
-        
-        Ok(())
-    }
-    else { context.private_reply("Must be different number!").await }
+        docstr!(format!
+            /// User: {user} (Profile: {profile})
+            /// Bet: {bet:?}
+            /// Dice: {d1:?} {d2:?} {d3:?} {d}
+            /// 
+            /// {result:?}
+            /// 
+            /// Money: {money}
+            bet = bet,
+            d1 = d1, d2 = d2, d3 = d3, d = d.sum(),
+            user = user.id().mention(),
+            profile = user.active_profile(),
+            money = user.active_ref().money(),
+            result = FormatResult(play.result()),
+        )
+    })?;
+    
+    context.message().send(s).await
 }
 
 macro_rules! bet {

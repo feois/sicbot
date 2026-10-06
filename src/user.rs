@@ -81,9 +81,8 @@ pub async fn list(context: Context<'_>, user: Option<Member>) -> Result<()> {
             writeln!(&mut s)
         })
     })??;
-    context.say(s).await?;
     
-    Ok(())
+    context.message().no_mention().send(s).await
 }
 
 #[poise::command(prefix_command, slash_command)]
@@ -91,10 +90,10 @@ pub async fn view(context: Context<'_>, user: Option<Member>, name: String) -> R
     let id = user.map_or(context.author().id, |user| user.user.id);
     
     let mut s = String::new();
-    let mut p = true;
+    let mut p = false;
     
     context.data().user(id)?.lock_ref(|user| {
-        let Some(profile) = user.profiles.get(&name) else { p = false; return Ok(()); };
+        let Some(profile) = user.profiles.get(&name) else { p = true; return Ok(()); };
         
         docstr!(write! s
             /// User: {user} (Profile: {profile})
@@ -107,15 +106,12 @@ pub async fn view(context: Context<'_>, user: Option<Member>, name: String) -> R
         writeln!(&mut s, "todo…")
     })??;
     
-    if p { context.say(s).await?; }
-    else { context.private_reply("Profile does not exist!").await?; }
-    
-    Ok(())
+    context.message().no_mention().visibility(p).send(if p { String::from("Profile does not exist!") } else { s }).await
 }
 
 #[poise::command(prefix_command, slash_command)]
 pub async fn create(context: Context<'_>, name: String, initial_fund: Option<u64>) -> Result<()> {
-    context.private_reply(context.data().user(context.author().id)?.lock_mut(|user| {
+    context.message().private().send(context.data().user(context.author().id)?.lock_mut(|user| {
         if user.profiles.contains_key(&name) {
             "Profile already exists!"
         }
@@ -134,7 +130,7 @@ pub async fn create(context: Context<'_>, name: String, initial_fund: Option<u64
 
 #[poise::command(prefix_command, slash_command)]
 pub async fn remove(context: Context<'_>, name: String) -> Result<()> {
-    context.private_reply(context.data().user(context.author().id)?.lock_mut(|user| {
+    context.message().private().send(context.data().user(context.author().id)?.lock_mut(|user| {
         if user.profiles.len() < 2 {
             "Cannot remove the only one profile"
         }
@@ -153,7 +149,7 @@ pub async fn switch(context: Context<'_>, profile: String) -> Result<()> {
     enum State { NotSwitched, Switched, NotFound }
     use State::*;
     
-    context.private_reply(match context.data().user(context.author().id)?.lock_mut(|user| {
+    context.message().private().send(match context.data().user(context.author().id)?.lock_mut(|user| {
         if user.active == profile { NotSwitched }
         else if user.profiles.contains_key(&profile) { user.active = profile; Switched }
         else { NotFound }
